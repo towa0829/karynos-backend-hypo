@@ -16,7 +16,7 @@ from schemas import (
     JobSummary,
     ResultResponse,
 )
-from vector import generate_profile_with_openai, search_jobs
+from vector import generate_profile_with_openai, search_jobs, generate_result_analysis
 
 router = APIRouter(prefix="/api/v1/recommend", tags=["recommend"])
 
@@ -206,8 +206,14 @@ def result(dreamer_id: str, db: Session = Depends(get_db)):
         if d:
             top_matches.append(JobSummary(**d))
 
+    # 回答要約 + いいねした職業をもとに最終分析文(HTML)をOpenAIで生成
+    final_analysis = generate_result_analysis(
+        profile.profile_text or "",
+        [{"name": j.name, "description": j.description} for j in liked_jobs],
+    )
+
     return ResultResponse(
-        personality_text=profile.profile_text or "",
+        personality_text=final_analysis,
         liked_jobs=liked_jobs,
         top_matches=top_matches,
     )

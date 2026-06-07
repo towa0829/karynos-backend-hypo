@@ -75,6 +75,67 @@ def generate_profile_with_openai(answers: List[Dict]) -> str:
         return raw_text
 
 
+def _strip_code_fence(content: str) -> str:
+    """```html ... ``` のようなコードフェンスを除去する。"""
+    content = content.strip()
+    if content.startswith("```"):
+        content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
+        content = re.sub(r"\n?```$", "", content).strip()
+    return content
+
+
+def generate_result_analysis(profile_text: str, liked_jobs: List[Dict]) -> str:
+    """診断回答の要約 + いいねした職業をもとに、最終的な分析文(HTML)を生成する。
+
+    profile_text: analyze時にOpenAIが生成した回答要約（HTMLまたはプレーン）
+    liked_jobs:   いいねした職業のリスト [{name, description}, ...]
+    """
+    # フォールバック: APIキーが無い場合は元の要約をそのまま返す
+    if not settings.openai_api_key:
+        return profile_text
+
+    # 入力用に回答要約からHTMLタグを除去
+    answer_summary = re.sub(r"<[^>]+>", " ", profile_text or "").strip()
+
+    if liked_jobs:
+        liked_lines = "\n".join(
+            f"- {j.get('name', '')}: {(j.get('description') or '')[:80]}"
+            for j in liked_jobs
+        )
+    else:
+        liked_lines = "（いいねした職業はありませんでした）"
+
+    client = OpenAI(api_key=settings.openai_api_key)
+    prompt = f"""あなたはキャリアアドバイザーです。
+以下の「診断回答の要約」と「ユーザーがいいねした職業」をもとに、
+この人物の性格・価値観・適性と、いいねした職業から読み取れる志向を踏まえた
+最終的なパーソナル分析文を300字程度で作成してください。
+
+出力は HTML フラグメントで返してください（<html>や<body>タグは不要）。
+使用してよいタグは <p>, <ul>, <li>, <strong>, <br> のみです。
+強調したいキーワードは <strong> で囲み、複数の特性は <ul><li> で箇条書きにしてください。
+コードブロックや ```html などのマークダウン記法は使わないでください。
+
+# 診断回答の要約
+{answer_summary or "（情報なし）"}
+
+# いいねした職業
+{liked_lines}
+
+最終分析文（HTMLフラグメント）:"""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=500,
+        )
+        return _strip_code_fence(response.choices[0].message.content)
+    except Exception as e:
+        print(f"[OpenAI] result analysis error: {e}")
+        return profile_text
+
+
 def search_jobs(profile_text: str, n_results: int = 30) -> List[Dict]:
     """Search ChromaDB and return ranked list of {job_id, score}."""
     collection = _get_collection()
