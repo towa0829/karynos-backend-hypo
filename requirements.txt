@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+pydantic-settings
+sqlalchemy
+psycopg2-binary
+python-dateutil
+openai
+chromadb==0.4.24
+sentence-transformers==2.7.0
+transformers==4.38.2
+httpx
+python-dotenv
