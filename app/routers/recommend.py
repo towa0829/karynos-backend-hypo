@@ -6,8 +6,15 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from database import get_db
-from models import Job, History, DreamerProfile
-from schemas import AnalyzeRequest, RecommendResponse, Recommendation
+from sqlalchemy import func
+from models import Job, JobImage, JobFeedback, History, DreamerProfile
+from schemas import (
+    AnalyzeRequest,
+    RecommendResponse,
+    Recommendation,
+    JobSummary,
+    ResultResponse,
+)
 from vector import generate_profile_with_openai, search_jobs
 
 router = APIRouter(prefix="/api/v1/recommend", tags=["recommend"])
@@ -16,6 +23,7 @@ router = APIRouter(prefix="/api/v1/recommend", tags=["recommend"])
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _save_profile(dreamer_id: str, job_scores: list, db: Session):
+    """Update only the consumable queue (job_scores)."""
     data = json.dumps(job_scores)
     db.execute(
         text("""
@@ -27,6 +35,48 @@ def _save_profile(dreamer_id: str, job_scores: list, db: Session):
         {"did": dreamer_id, "data": data},
     )
     db.commit()
+
+
+def _init_profile(dreamer_id: str, job_scores: list, profile_text: str, db: Session):
+    """Initialize profile at analyze time: consumable queue + immutable ranking + text."""
+    data = json.dumps(job_scores)
+    db.execute(
+        text("""
+            INSERT INTO dreamer_profiles (dreamer_id, job_scores, original_scores, profile_text, updated_at)
+            VALUES (:did, CAST(:data AS jsonb), CAST(:data AS jsonb), :ptext, NOW())
+            ON CONFLICT (dreamer_id)
+            DO UPDATE SET job_scores = CAST(:data AS jsonb),
+                          original_scores = CAST(:data AS jsonb),
+                          profile_text = :ptext,
+                          updated_at = NOW()
+        """),
+        {"did": dreamer_id, "data": data, "ptext": profile_text},
+    )
+    db.commit()
+
+
+def _job_detail(job_id: int, score: float, db: Session) -> dict:
+    """Fetch job name/description + avg salary/age + image list."""
+    job = db.query(Job).filter_by(job_id=job_id).first()
+    if not job:
+        return None
+
+    fb = db.query(
+        func.round(func.avg(JobFeedback.salary)).label("salary"),
+        func.round(func.avg(JobFeedback.age)).label("age"),
+    ).filter(JobFeedback.job_id == job_id).first()
+
+    imgs = [r.img_url for r in db.query(JobImage).filter_by(job_id=job_id).all()]
+
+    return {
+        "job_id": job.job_id,
+        "name": job.name,
+        "salary": int(fb.salary) if fb and fb.salary else 0,
+        "age": int(fb.age) if fb and fb.age else 0,
+        "imgs": imgs,
+        "description": job.description or "",
+        "similarity_score": score,
+    }
 
 
 def _load_profile(dreamer_id: str, db: Session) -> list:
@@ -73,11 +123,11 @@ def analyze(req: AnalyzeRequest, db: Session = Depends(get_db)):
 
     # Filter to existing jobs only
     db.expire_all()
-    all_jobs = db.query(Job).all()
+    all_jobs = db.query(Job.job_id).all()
     job_id_set = {j.job_id for j in all_jobs}
     job_scores = [s for s in job_scores if s["job_id"] in job_id_set]
 
-    _save_profile(req.dreamer_id, job_scores, db)
+    _init_profile(req.dreamer_id, job_scores, profile_text, db)
     return {"status": "ok", "matched": len(job_scores)}
 
 
@@ -92,8 +142,8 @@ def recommend(dreamer_id: str, db: Session = Depends(get_db)):
     score = item.get("score", 0.0)
 
     db.expire_all()
-    job = db.query(Job).filter_by(job_id=job_id).first()
-    if not job:
+    detail = _job_detail(job_id, score, db)
+    if not detail:
         raise HTTPException(status_code=404, detail="Job not found")
 
     history = History(
@@ -107,15 +157,55 @@ def recommend(dreamer_id: str, db: Session = Depends(get_db)):
 
     return RecommendResponse(
         recommendation=Recommendation(
-            job_id=job.job_id,
             history_id=str(history.history_id),
-            name=job.name,
-            salary=job.salary or 0,
-            age=job.age or 0,
-            imgs=job.imgs or [],
-            description=job.description or "",
-            similarity_score=score,
+            **detail,
         )
+    )
+
+
+@router.get("/{dreamer_id}/result", response_model=ResultResponse)
+def result(dreamer_id: str, db: Session = Depends(get_db)):
+    """診断結果: 性格分析文 + いいねした職業 + 適合度トップ5"""
+    db.expire_all()
+    profile = db.query(DreamerProfile).filter_by(dreamer_id=dreamer_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    original = profile.original_scores if isinstance(profile.original_scores, list) else []
+    score_map = {s["job_id"]: s.get("score", 0.0) for s in original}
+
+    # いいねした職業 (good=true)、重複job_id排除、適合度順
+    liked_ids = [
+        h.job_id
+        for h in db.query(History)
+        .filter_by(dreamer_id=dreamer_id, good=True)
+        .all()
+    ]
+    seen = set()
+    unique_liked = []
+    for jid in liked_ids:
+        if jid not in seen:
+            seen.add(jid)
+            unique_liked.append(jid)
+    unique_liked.sort(key=lambda j: score_map.get(j, 0.0), reverse=True)
+
+    liked_jobs = []
+    for jid in unique_liked:
+        d = _job_detail(jid, score_map.get(jid, 0.0), db)
+        if d:
+            liked_jobs.append(JobSummary(**d))
+
+    # 適合度トップ5
+    top_matches = []
+    for s in original[:5]:
+        d = _job_detail(s["job_id"], s.get("score", 0.0), db)
+        if d:
+            top_matches.append(JobSummary(**d))
+
+    return ResultResponse(
+        personality_text=profile.profile_text or "",
+        liked_jobs=liked_jobs,
+        top_matches=top_matches,
     )
 
 

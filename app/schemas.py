@@ -41,3 +41,17 @@ class Recommendation(BaseModel):
 
 class RecommendResponse(BaseModel):
     recommendation: Recommendation
+
+class JobSummary(BaseModel):
+    job_id: int
+    name: str
+    salary: int
+    age: int
+    imgs: List[str]
+    description: str
+    similarity_score: float
+
+class ResultResponse(BaseModel):
+    personality_text: str
+    liked_jobs: List[JobSummary]
+    top_matches: List[JobSummary]
