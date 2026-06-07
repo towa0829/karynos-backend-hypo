@@ -1,5 +1,6 @@
 import uuid
 import json
+import re
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -118,8 +119,11 @@ def _reorder(dreamer_id: str, job_id: int, boost: bool, db: Session):
 def analyze(req: AnalyzeRequest, db: Session = Depends(get_db)):
     """Analyze answers and build ranked job list."""
     answers = [a.dict() for a in req.answers]
+    # profile_text は表示用の HTML フラグメント
     profile_text = generate_profile_with_openai(answers)
-    job_scores = search_jobs(profile_text)
+    # 検索には HTML タグを除去したプレーンテキストを使う（検索精度を保つ）
+    search_text = re.sub(r"<[^>]+>", " ", profile_text)
+    job_scores = search_jobs(search_text)
 
     # Filter to existing jobs only
     db.expire_all()

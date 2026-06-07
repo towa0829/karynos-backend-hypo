@@ -1,4 +1,5 @@
 import os
+import re
 import json
 from typing import List, Dict
 import chromadb
@@ -48,9 +49,14 @@ def generate_profile_with_openai(answers: List[Dict]) -> str:
     client = OpenAI(api_key=settings.openai_api_key)
     prompt = f"""以下は就職診断の回答です。この回答から、この人物の性格・価値観・適性を200字程度で要約してください。
 
+出力は HTML フラグメントで返してください（<html>や<body>タグは不要）。
+使用してよいタグは <p>, <ul>, <li>, <strong>, <br> のみです。
+強調したいキーワードは <strong> で囲み、複数の特性は <ul><li> で箇条書きにしてください。
+コードブロックや ```html などのマークダウン記法は使わないでください。
+
 回答: {raw_text}
 
-要約（職業マッチングに使用）:"""
+要約（HTMLフラグメント）:"""
 
     try:
         response = client.chat.completions.create(
@@ -58,7 +64,12 @@ def generate_profile_with_openai(answers: List[Dict]) -> str:
             messages=[{"role": "user", "content": prompt}],
             max_tokens=300,
         )
-        return response.choices[0].message.content.strip()
+        content = response.choices[0].message.content.strip()
+        # ```html ... ``` のようなコードフェンスが付いた場合は除去
+        if content.startswith("```"):
+            content = re.sub(r"^```[a-zA-Z]*\n?", "", content)
+            content = re.sub(r"\n?```$", "", content).strip()
+        return content
     except Exception as e:
         print(f"[OpenAI] error: {e}")
         return raw_text
